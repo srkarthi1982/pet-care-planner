@@ -1,0 +1,17 @@
+---
+const user = Astro.locals.user;
+---
+
+<header class="border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+  <div class="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
+    <div>
+      <p class="text-xs uppercase tracking-[0.25em] text-slate-400">Ansiversa Mini App</p>
+      <h1 class="text-lg font-semibold text-white">Pet Care Planner</h1>
+    </div>
+    <nav class="flex items-center gap-3 text-sm text-slate-300">
+      <a href="/app" class="hover:text-white">Workspace</a>
+      <a href="/" class="hover:text-white">Landing</a>
+      {user?.name ? <span class="rounded-full bg-slate-800 px-3 py-1 text-xs">{user.name}</span> : null}
+    </nav>
+  </div>
+</header>

@@ -1,0 +1,97 @@
+---
+import { AvButton } from "@ansiversa/components";
+import { db, eq, PetCareLogs, PetCareRoutines, Pets } from "astro:db";
+import AppShell from "../../layouts/AppShell.astro";
+import AvMiniAppBar from "../../components/AvMiniAppBar.astro";
+import { getPetSummaryForUser } from "../../lib/pet-care";
+
+const user = Astro.locals.user;
+if (!user) return Astro.redirect("/");
+
+const pets = await db.select().from(Pets).where(eq(Pets.userId, user.id));
+const [routines, logs, summary] = await Promise.all([
+  db.select().from(PetCareRoutines).where(eq(PetCareRoutines.userId, user.id)),
+  db.select().from(PetCareLogs).where(eq(PetCareLogs.userId, user.id)),
+  getPetSummaryForUser(user.id),
+]);
+
+const activePets = pets.filter((pet) => pet.status === "active");
+const archivedPets = pets.filter((pet) => pet.status === "archived");
+---
+
+<AppShell title="Pet Care Planner Workspace">
+  <AvMiniAppBar />
+  <main class="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6" x-data x-init="$store.petCare.init({ pets: JSON.parse($el.dataset.pets), activeTab: 'overview' })" data-pets={JSON.stringify(pets)}>
+    <section class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+      <article class="rounded-2xl border border-slate-800 bg-slate-900 p-4"><p class="text-xs text-slate-400">Total pets</p><p class="text-2xl text-white">{summary.totalPets}</p></article>
+      <article class="rounded-2xl border border-slate-800 bg-slate-900 p-4"><p class="text-xs text-slate-400">Active pets</p><p class="text-2xl text-white">{summary.activePets}</p></article>
+      <article class="rounded-2xl border border-slate-800 bg-slate-900 p-4"><p class="text-xs text-slate-400">Archived pets</p><p class="text-2xl text-white">{summary.archivedPets}</p></article>
+      <article class="rounded-2xl border border-slate-800 bg-slate-900 p-4"><p class="text-xs text-slate-400">Routines</p><p class="text-2xl text-white">{routines.length}</p></article>
+      <article class="rounded-2xl border border-slate-800 bg-slate-900 p-4"><p class="text-xs text-slate-400">Recent logs</p><p class="text-2xl text-white">{summary.recentLogsCount}</p></article>
+    </section>
+
+    <section class="flex flex-wrap items-center justify-between gap-3">
+      <div class="flex gap-2">
+        <button class="rounded-full border border-slate-700 px-4 py-2 text-sm" @click="$store.petCare.setTab('overview')">Overview</button>
+        <button class="rounded-full border border-slate-700 px-4 py-2 text-sm" @click="$store.petCare.setTab('pets')">Pets</button>
+        <button class="rounded-full border border-slate-700 px-4 py-2 text-sm" @click="$store.petCare.setTab('archived')">Archived</button>
+      </div>
+      <AvButton as="button" @click="$store.petCare.openModal('createPet')">Add pet</AvButton>
+    </section>
+
+    <section class="rounded-2xl border border-slate-800 bg-slate-900 p-4" x-show="$store.petCare.activeTab === 'overview'">
+      <h2 class="text-lg text-white">Care activity</h2>
+      <p class="mt-1 text-sm text-slate-300">You have {activePets.length} active pet(s) and {logs.length} total care logs.</p>
+    </section>
+
+    <section class="rounded-2xl border border-slate-800 bg-slate-900 p-4" x-show="$store.petCare.activeTab === 'pets'">
+      <h2 class="mb-3 text-lg text-white">Active pets</h2>
+      {activePets.length ? (
+        <ul class="space-y-3">
+          {activePets.map((pet) => (
+            <li class="flex items-center justify-between rounded-xl border border-slate-800 p-3">
+              <div>
+                <p class="text-white">{pet.name}</p>
+                <p class="text-xs text-slate-400">{pet.petType ?? "pet"} {pet.breed ? `· ${pet.breed}` : ""}</p>
+              </div>
+              <div class="flex gap-2">
+                <a href={`/app/pets/${pet.id}`} class="rounded-lg border border-slate-700 px-3 py-1 text-sm">Open</a>
+                <button class="rounded-lg border border-slate-700 px-3 py-1 text-sm" @click={`$store.petCare.archivePet('${pet.id}')`}>Archive</button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : <p class="text-sm text-slate-400">No pets yet. Add your first pet to get started.</p>}
+    </section>
+
+    <section class="rounded-2xl border border-slate-800 bg-slate-900 p-4" x-show="$store.petCare.activeTab === 'archived'">
+      <h2 class="mb-3 text-lg text-white">Archived pets</h2>
+      {archivedPets.length ? (
+        <ul class="space-y-3">
+          {archivedPets.map((pet) => (
+            <li class="flex items-center justify-between rounded-xl border border-slate-800 p-3">
+              <p class="text-slate-200">{pet.name}</p>
+              <button class="rounded-lg border border-slate-700 px-3 py-1 text-sm" @click={`$store.petCare.restorePet('${pet.id}')`}>Restore</button>
+            </li>
+          ))}
+        </ul>
+      ) : <p class="text-sm text-slate-400">No archived pets.</p>}
+    </section>
+
+    <dialog class="w-full max-w-xl rounded-2xl border border-slate-700 bg-slate-950 p-6 text-slate-100" :open="$store.petCare.modals.createPet">
+      <form class="space-y-3" @submit.prevent="$store.petCare.submitCreatePet($event.target)">
+        <h3 class="text-lg">Create pet</h3>
+        <input name="name" required placeholder="Name" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <input name="petType" placeholder="Type (dog/cat...)" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <input name="breed" placeholder="Breed" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <input type="date" name="birthday" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <input name="ageLabel" placeholder="Age label" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <textarea name="notes" placeholder="Notes" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2"></textarea>
+        <div class="flex justify-end gap-2">
+          <button type="button" class="rounded-lg border border-slate-700 px-3 py-2" @click="$store.petCare.closeModal('createPet')">Cancel</button>
+          <button type="submit" class="rounded-lg bg-indigo-500 px-3 py-2 text-white">Save</button>
+        </div>
+      </form>
+    </dialog>
+  </main>
+</AppShell>

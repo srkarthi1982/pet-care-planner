@@ -1,0 +1,115 @@
+---
+import AppShell from "../../../layouts/AppShell.astro";
+import AvMiniAppBar from "../../../components/AvMiniAppBar.astro";
+import { getPetDetailForUser } from "../../../lib/pet-care";
+
+const user = Astro.locals.user;
+if (!user) return Astro.redirect("/");
+
+const petId = Astro.params.id!;
+const detail = await getPetDetailForUser(user.id, petId);
+if (!detail) return Astro.redirect("/app");
+
+const { pet, routines, logs, vetVisits, stats } = detail;
+---
+
+<AppShell title={`${pet.name} | Pet Care Planner`}>
+  <AvMiniAppBar />
+  <main class="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6" x-data x-init="$store.petCare.init({ activePetDetail: JSON.parse($el.dataset.detail) })" data-detail={JSON.stringify(detail)}>
+    <a href="/app" class="text-sm text-slate-300">← Back to workspace</a>
+
+    <section class="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+      <h1 class="text-2xl text-white">{pet.name}</h1>
+      <p class="mt-1 text-sm text-slate-400">{pet.petType ?? "pet"} {pet.breed ? `· ${pet.breed}` : ""} {pet.ageLabel ? `· ${pet.ageLabel}` : ""}</p>
+      <div class="mt-4 grid gap-3 sm:grid-cols-3 text-sm">
+        <div class="rounded-xl border border-slate-800 p-3"><p class="text-slate-400">Active routines</p><p class="text-xl text-white">{stats.totalActiveRoutines}</p></div>
+        <div class="rounded-xl border border-slate-800 p-3"><p class="text-slate-400">Recent logs</p><p class="text-xl text-white">{stats.recentLogCount}</p></div>
+        <div class="rounded-xl border border-slate-800 p-3"><p class="text-slate-400">Upcoming follow-up</p><p class="text-xl text-white">{stats.upcomingFollowUpsCount}</p></div>
+      </div>
+      {pet.notes ? <p class="mt-3 text-sm text-slate-300">{pet.notes}</p> : null}
+    </section>
+
+    <section class="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+      <div class="mb-3 flex items-center justify-between"><h2 class="text-lg text-white">Care routines</h2><button class="rounded-lg border border-slate-700 px-3 py-1 text-sm" @click="$store.petCare.openModal('routine')">Add routine</button></div>
+      <ul class="space-y-2">
+        {routines.map((routine) => (
+          <li class="flex items-center justify-between rounded-xl border border-slate-800 p-3">
+            <div>
+              <p class="text-white">{routine.title}</p>
+              <p class="text-xs text-slate-400">{routine.routineType ?? "custom"} · {routine.frequencyLabel ?? "flexible"}</p>
+            </div>
+            <div class="flex gap-2">
+              <button class="rounded-lg border border-slate-700 px-2 py-1 text-xs" @click={`$store.petCare.toggleRoutine('${routine.id}', ${!routine.isActive})`}>{routine.isActive ? "Pause" : "Activate"}</button>
+              <button class="rounded-lg border border-slate-700 px-2 py-1 text-xs" @click={`$store.petCare.deleteRoutine('${routine.id}')`}>Delete</button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+
+    <section class="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+      <div class="mb-3 flex items-center justify-between"><h2 class="text-lg text-white">Recent care logs</h2><button class="rounded-lg border border-slate-700 px-3 py-1 text-sm" @click="$store.petCare.openModal('log')">Add log</button></div>
+      <ul class="space-y-2">
+        {logs.map((log) => (
+          <li class="rounded-xl border border-slate-800 p-3 text-sm">
+            <p class="text-white">{log.title}</p>
+            <p class="text-xs text-slate-400">{new Date(log.loggedAt).toLocaleString()}</p>
+            {log.notes ? <p class="mt-1 text-slate-300">{log.notes}</p> : null}
+          </li>
+        ))}
+      </ul>
+    </section>
+
+    <section class="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+      <div class="mb-3 flex items-center justify-between"><h2 class="text-lg text-white">Vet visits</h2><button class="rounded-lg border border-slate-700 px-3 py-1 text-sm" @click="$store.petCare.openModal('vet')">Add visit</button></div>
+      <ul class="space-y-2">
+        {vetVisits.map((visit) => (
+          <li class="flex items-center justify-between rounded-xl border border-slate-800 p-3">
+            <div>
+              <p class="text-white">{new Date(visit.visitDate).toLocaleDateString()} {visit.reason ? `· ${visit.reason}` : ""}</p>
+              <p class="text-xs text-slate-400">{visit.clinicName ?? "Clinic not specified"}</p>
+            </div>
+            <button class="rounded-lg border border-slate-700 px-2 py-1 text-xs" @click={`$store.petCare.deleteVetVisit('${visit.id}')`}>Delete</button>
+          </li>
+        ))}
+      </ul>
+    </section>
+
+    <dialog class="w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-950 p-6 text-slate-100" :open="$store.petCare.modals.routine">
+      <form class="space-y-3" @submit.prevent="$store.petCare.submitRoutine($event.target)">
+        <input type="hidden" name="petId" value={pet.id} />
+        <h3 class="text-lg">Add routine</h3>
+        <input name="title" required placeholder="Routine title" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <input name="routineType" placeholder="Type" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <input name="frequencyLabel" placeholder="Frequency" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <input name="timeOfDay" placeholder="Time of day" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <textarea name="notes" placeholder="Notes" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2"></textarea>
+        <div class="flex justify-end gap-2"><button type="button" class="rounded-lg border border-slate-700 px-3 py-2" @click="$store.petCare.closeModal('routine')">Cancel</button><button class="rounded-lg bg-indigo-500 px-3 py-2">Save</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-950 p-6 text-slate-100" :open="$store.petCare.modals.log">
+      <form class="space-y-3" @submit.prevent="$store.petCare.submitLog($event.target)">
+        <input type="hidden" name="petId" value={pet.id} />
+        <h3 class="text-lg">Add care log</h3>
+        <input name="title" required placeholder="What was done?" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <input type="datetime-local" name="loggedAt" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <textarea name="notes" placeholder="Notes" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2"></textarea>
+        <div class="flex justify-end gap-2"><button type="button" class="rounded-lg border border-slate-700 px-3 py-2" @click="$store.petCare.closeModal('log')">Cancel</button><button class="rounded-lg bg-indigo-500 px-3 py-2">Save</button></div>
+      </form>
+    </dialog>
+
+    <dialog class="w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-950 p-6 text-slate-100" :open="$store.petCare.modals.vet">
+      <form class="space-y-3" @submit.prevent="$store.petCare.submitVetVisit($event.target)">
+        <input type="hidden" name="petId" value={pet.id} />
+        <h3 class="text-lg">Add vet visit</h3>
+        <input type="date" name="visitDate" required class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <input name="clinicName" placeholder="Clinic name" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <input name="reason" placeholder="Reason" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <input type="date" name="followUpDate" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2" />
+        <textarea name="notes" placeholder="Notes" class="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2"></textarea>
+        <div class="flex justify-end gap-2"><button type="button" class="rounded-lg border border-slate-700 px-3 py-2" @click="$store.petCare.closeModal('vet')">Cancel</button><button class="rounded-lg bg-indigo-500 px-3 py-2">Save</button></div>
+      </form>
+    </dialog>
+  </main>
+</AppShell>

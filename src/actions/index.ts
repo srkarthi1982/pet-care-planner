@@ -3,76 +3,99 @@ import { ActionError, defineAction } from "astro:actions";
 import { z } from "astro:schema";
 import {
   and,
+  asc,
   db,
+  desc,
   eq,
   PetCareLogs,
   PetCareRoutines,
   Pets,
   VetVisits,
 } from "astro:db";
+import {
+  getPetDetailForUser,
+  listPetsForUser,
+  pushDashboardSummary,
+  pushNotification,
+} from "../lib/pet-care";
+
+const petTypeEnum = z.enum(["dog", "cat", "bird", "fish", "rabbit", "other"]);
+const routineTypeEnum = z.enum(["feeding", "walking", "grooming", "medicine", "play", "custom"]);
 
 function requireUser(context: ActionAPIContext) {
-  const locals = context.locals as App.Locals | undefined;
-  const user = locals?.user;
-
+  const user = (context.locals as App.Locals).user;
   if (!user) {
-    throw new ActionError({
-      code: "UNAUTHORIZED",
-      message: "You must be signed in to perform this action.",
-    });
+    throw new ActionError({ code: "UNAUTHORIZED", message: "Sign in required." });
   }
-
   return user;
 }
 
-function parseDateInput(value?: Date | string | null) {
+function parseDate(value?: Date | string | null) {
   if (!value) return undefined;
   return value instanceof Date ? value : new Date(value);
 }
 
 async function assertPetOwnership(petId: string, userId: string) {
-  const pet = await db
-    .select()
-    .from(Pets)
-    .where(and(eq(Pets.id, petId), eq(Pets.userId, userId)));
-
-  if (!pet.length) {
-    throw new ActionError({
-      code: "NOT_FOUND",
-      message: "Pet not found.",
-    });
+  const rows = await db.select().from(Pets).where(and(eq(Pets.id, petId), eq(Pets.userId, userId)));
+  if (!rows.length) {
+    throw new ActionError({ code: "NOT_FOUND", message: "Pet not found." });
   }
-
-  return pet[0];
+  return rows[0];
 }
 
 async function assertRoutineOwnership(routineId: string, userId: string) {
-  const routine = await db
+  const rows = await db
     .select()
     .from(PetCareRoutines)
     .where(and(eq(PetCareRoutines.id, routineId), eq(PetCareRoutines.userId, userId)));
-
-  if (!routine.length) {
-    throw new ActionError({
-      code: "NOT_FOUND",
-      message: "Care routine not found.",
-    });
+  if (!rows.length) {
+    throw new ActionError({ code: "NOT_FOUND", message: "Routine not found." });
   }
+  return rows[0];
+}
 
-  return routine[0];
+async function assertVetVisitOwnership(visitId: string, userId: string) {
+  const rows = await db
+    .select()
+    .from(VetVisits)
+    .where(and(eq(VetVisits.id, visitId), eq(VetVisits.userId, userId)));
+  if (!rows.length) {
+    throw new ActionError({ code: "NOT_FOUND", message: "Vet visit not found." });
+  }
+  return rows[0];
 }
 
 export const server = {
+  listPets: defineAction({
+    handler: async (_, context) => {
+      const user = requireUser(context);
+      const pets = await listPetsForUser(user.id);
+      return { success: true, data: { items: pets } };
+    },
+  }),
+
+  getPetDetail: defineAction({
+    input: z.object({ petId: z.string().min(1) }),
+    handler: async (input, context) => {
+      const user = requireUser(context);
+      const detail = await getPetDetailForUser(user.id, input.petId);
+
+      if (!detail) {
+        throw new ActionError({ code: "NOT_FOUND", message: "Pet not found." });
+      }
+
+      return { success: true, data: detail };
+    },
+  }),
+
   createPet: defineAction({
     input: z.object({
-      name: z.string().min(1),
-      species: z.string().optional(),
-      breed: z.string().optional(),
-      gender: z.string().optional(),
-      dateOfBirth: z.union([z.date(), z.string().datetime()]).optional(),
-      color: z.string().optional(),
-      weightKg: z.number().optional(),
-      notes: z.string().optional(),
+      name: z.string().min(1).max(80),
+      petType: petTypeEnum.optional(),
+      breed: z.string().max(80).optional(),
+      birthday: z.union([z.date(), z.string().date()]).optional(),
+      ageLabel: z.string().max(40).optional(),
+      notes: z.string().max(1000).optional(),
     }),
     handler: async (input, context) => {
       const user = requireUser(context);
@@ -81,19 +104,30 @@ export const server = {
       const pet = {
         id: crypto.randomUUID(),
         userId: user.id,
-        name: input.name,
-        species: input.species,
-        breed: input.breed,
-        gender: input.gender,
-        dateOfBirth: parseDateInput(input.dateOfBirth),
-        color: input.color,
-        weightKg: input.weightKg,
-        notes: input.notes,
+        name: input.name.trim(),
+        petType: input.petType,
+        breed: input.breed?.trim() || undefined,
+        birthday: parseDate(input.birthday),
+        ageLabel: input.ageLabel?.trim() || undefined,
+        notes: input.notes?.trim() || undefined,
+        status: "active",
         createdAt: now,
         updatedAt: now,
       } satisfies typeof Pets.$inferInsert;
 
       await db.insert(Pets).values(pet);
+
+      await Promise.all([
+        pushDashboardSummary({ userId: user.id, sessionToken: context.locals.sessionToken, rootAppUrl: context.locals.rootAppUrl }),
+        pushNotification({
+          userId: user.id,
+          sessionToken: context.locals.sessionToken,
+          rootAppUrl: context.locals.rootAppUrl,
+          title: "Pet added",
+          message: `${pet.name} has been added to your care planner.`,
+          level: "success",
+        }),
+      ]);
 
       return { success: true, data: { pet } };
     },
@@ -102,97 +136,103 @@ export const server = {
   updatePet: defineAction({
     input: z.object({
       id: z.string().min(1),
-      name: z.string().min(1).optional(),
-      species: z.string().optional(),
-      breed: z.string().optional(),
-      gender: z.string().optional(),
-      dateOfBirth: z.union([z.date(), z.string().datetime()]).optional(),
-      color: z.string().optional(),
-      weightKg: z.number().optional(),
-      notes: z.string().optional(),
+      name: z.string().min(1).max(80),
+      petType: petTypeEnum.nullable().optional(),
+      breed: z.string().max(80).nullable().optional(),
+      birthday: z.union([z.date(), z.string().date()]).nullable().optional(),
+      ageLabel: z.string().max(40).nullable().optional(),
+      notes: z.string().max(1000).nullable().optional(),
     }),
     handler: async (input, context) => {
       const user = requireUser(context);
       await assertPetOwnership(input.id, user.id);
 
       const updates: Partial<typeof Pets.$inferInsert> = {
+        name: input.name.trim(),
         updatedAt: new Date(),
       };
+      if (input.petType !== undefined) updates.petType = input.petType || undefined;
+      if (input.breed !== undefined) updates.breed = input.breed?.trim() || undefined;
+      if (input.birthday !== undefined) updates.birthday = parseDate(input.birthday);
+      if (input.ageLabel !== undefined) updates.ageLabel = input.ageLabel?.trim() || undefined;
+      if (input.notes !== undefined) updates.notes = input.notes?.trim() || undefined;
 
-      if (input.name !== undefined) updates.name = input.name;
-      if (input.species !== undefined) updates.species = input.species;
-      if (input.breed !== undefined) updates.breed = input.breed;
-      if (input.gender !== undefined) updates.gender = input.gender;
-      if (input.color !== undefined) updates.color = input.color;
-      if (input.weightKg !== undefined) updates.weightKg = input.weightKg;
-      if (input.notes !== undefined) updates.notes = input.notes;
-      if (input.dateOfBirth !== undefined)
-        updates.dateOfBirth = parseDateInput(input.dateOfBirth);
-
-      await db
-        .update(Pets)
-        .set(updates)
-        .where(and(eq(Pets.id, input.id), eq(Pets.userId, user.id)));
+      await db.update(Pets).set(updates).where(and(eq(Pets.id, input.id), eq(Pets.userId, user.id)));
+      await pushDashboardSummary({ userId: user.id, sessionToken: context.locals.sessionToken, rootAppUrl: context.locals.rootAppUrl });
 
       return { success: true };
     },
   }),
 
-  deletePet: defineAction({
+  archivePet: defineAction({
     input: z.object({ id: z.string().min(1) }),
     handler: async (input, context) => {
       const user = requireUser(context);
       await assertPetOwnership(input.id, user.id);
 
       await db
-        .delete(Pets)
+        .update(Pets)
+        .set({ status: "archived", archivedAt: new Date(), updatedAt: new Date() })
         .where(and(eq(Pets.id, input.id), eq(Pets.userId, user.id)));
 
+      await pushDashboardSummary({ userId: user.id, sessionToken: context.locals.sessionToken, rootAppUrl: context.locals.rootAppUrl });
       return { success: true };
     },
   }),
 
-  listPets: defineAction({
-    input: z.object({}).optional(),
-    handler: async (_input, context) => {
+  restorePet: defineAction({
+    input: z.object({ id: z.string().min(1) }),
+    handler: async (input, context) => {
       const user = requireUser(context);
-      const pets = await db.select().from(Pets).where(eq(Pets.userId, user.id));
+      await assertPetOwnership(input.id, user.id);
 
-      return { success: true, data: { items: pets, total: pets.length } };
+      await db
+        .update(Pets)
+        .set({ status: "active", archivedAt: undefined, updatedAt: new Date() })
+        .where(and(eq(Pets.id, input.id), eq(Pets.userId, user.id)));
+
+      await pushDashboardSummary({ userId: user.id, sessionToken: context.locals.sessionToken, rootAppUrl: context.locals.rootAppUrl });
+      return { success: true };
     },
   }),
 
   createPetCareRoutine: defineAction({
     input: z.object({
       petId: z.string().min(1),
-      name: z.string().min(1),
-      description: z.string().optional(),
-      frequency: z.string().optional(),
-      timeOfDayLocal: z.string().optional(),
-      daysOfWeek: z.array(z.string()).optional(),
+      title: z.string().min(1).max(120),
+      routineType: routineTypeEnum.optional(),
+      frequencyLabel: z.string().max(60).optional(),
+      timeOfDay: z.string().max(40).optional(),
+      notes: z.string().max(800).optional(),
     }),
     handler: async (input, context) => {
       const user = requireUser(context);
       await assertPetOwnership(input.petId, user.id);
-      const now = new Date();
+
+      const last = await db
+        .select()
+        .from(PetCareRoutines)
+        .where(and(eq(PetCareRoutines.petId, input.petId), eq(PetCareRoutines.userId, user.id)))
+        .orderBy(desc(PetCareRoutines.sortOrder))
+        .limit(1);
 
       const routine = {
         id: crypto.randomUUID(),
         petId: input.petId,
         userId: user.id,
-        name: input.name,
-        description: input.description,
-        frequency: input.frequency,
-        timeOfDayLocal: input.timeOfDayLocal,
-        daysOfWeekJson: input.daysOfWeek
-          ? JSON.stringify(input.daysOfWeek)
-          : undefined,
+        title: input.title.trim(),
+        routineType: input.routineType,
+        frequencyLabel: input.frequencyLabel?.trim() || undefined,
+        timeOfDay: input.timeOfDay?.trim() || undefined,
+        notes: input.notes?.trim() || undefined,
         isActive: true,
-        createdAt: now,
-        updatedAt: now,
+        sortOrder: (last[0]?.sortOrder ?? -1) + 1,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       } satisfies typeof PetCareRoutines.$inferInsert;
 
       await db.insert(PetCareRoutines).values(routine);
+      await pushDashboardSummary({ userId: user.id, sessionToken: context.locals.sessionToken, rootAppUrl: context.locals.rootAppUrl });
 
       return { success: true, data: { routine } };
     },
@@ -201,81 +241,90 @@ export const server = {
   updatePetCareRoutine: defineAction({
     input: z.object({
       id: z.string().min(1),
-      petId: z.string().optional(),
-      name: z.string().min(1).optional(),
-      description: z.string().optional(),
-      frequency: z.string().optional(),
-      timeOfDayLocal: z.string().optional(),
-      daysOfWeek: z.array(z.string()).optional(),
-      isActive: z.boolean().optional(),
+      title: z.string().min(1).max(120),
+      routineType: routineTypeEnum.nullable().optional(),
+      frequencyLabel: z.string().max(60).nullable().optional(),
+      timeOfDay: z.string().max(40).nullable().optional(),
+      notes: z.string().max(800).nullable().optional(),
     }),
-    handler: async (input, context) => {
-      const user = requireUser(context);
-      const routine = await assertRoutineOwnership(input.id, user.id);
-
-      const targetPetId = input.petId ?? routine.petId;
-      await assertPetOwnership(targetPetId, user.id);
-
-      const updates: Partial<typeof PetCareRoutines.$inferInsert> = {
-        updatedAt: new Date(),
-      };
-
-      if (input.petId !== undefined) updates.petId = input.petId;
-      if (input.name !== undefined) updates.name = input.name;
-      if (input.description !== undefined) updates.description = input.description;
-      if (input.frequency !== undefined) updates.frequency = input.frequency;
-      if (input.timeOfDayLocal !== undefined)
-        updates.timeOfDayLocal = input.timeOfDayLocal;
-      if (input.daysOfWeek !== undefined)
-        updates.daysOfWeekJson = JSON.stringify(input.daysOfWeek);
-      if (input.isActive !== undefined) updates.isActive = input.isActive;
-
-      await db
-        .update(PetCareRoutines)
-        .set(updates)
-        .where(and(eq(PetCareRoutines.id, input.id), eq(PetCareRoutines.userId, user.id)));
-
-      return { success: true };
-    },
-  }),
-
-  archivePetCareRoutine: defineAction({
-    input: z.object({ id: z.string().min(1) }),
     handler: async (input, context) => {
       const user = requireUser(context);
       await assertRoutineOwnership(input.id, user.id);
 
       await db
         .update(PetCareRoutines)
-        .set({ isActive: false, updatedAt: new Date() })
+        .set({
+          title: input.title.trim(),
+          routineType: input.routineType || undefined,
+          frequencyLabel: input.frequencyLabel?.trim() || undefined,
+          timeOfDay: input.timeOfDay?.trim() || undefined,
+          notes: input.notes?.trim() || undefined,
+          updatedAt: new Date(),
+        })
         .where(and(eq(PetCareRoutines.id, input.id), eq(PetCareRoutines.userId, user.id)));
 
       return { success: true };
     },
   }),
 
-  listPetCareRoutines: defineAction({
-    input: z
-      .object({
-        petId: z.string().optional(),
-        includeInactive: z.boolean().default(false),
-      })
-      .optional(),
+  togglePetCareRoutineActive: defineAction({
+    input: z.object({ id: z.string().min(1), isActive: z.boolean() }),
     handler: async (input, context) => {
       const user = requireUser(context);
-      const filters = [eq(PetCareRoutines.userId, user.id)];
+      await assertRoutineOwnership(input.id, user.id);
 
-      if (input?.petId) filters.push(eq(PetCareRoutines.petId, input.petId));
-      if (!input?.includeInactive)
-        filters.push(eq(PetCareRoutines.isActive, true));
+      await db
+        .update(PetCareRoutines)
+        .set({ isActive: input.isActive, updatedAt: new Date() })
+        .where(and(eq(PetCareRoutines.id, input.id), eq(PetCareRoutines.userId, user.id)));
 
-      const whereClause = filters.length === 1 ? filters[0] : and(...filters);
+      await pushDashboardSummary({ userId: user.id, sessionToken: context.locals.sessionToken, rootAppUrl: context.locals.rootAppUrl });
+      return { success: true };
+    },
+  }),
+
+  deletePetCareRoutine: defineAction({
+    input: z.object({ id: z.string().min(1) }),
+    handler: async (input, context) => {
+      const user = requireUser(context);
+      await assertRoutineOwnership(input.id, user.id);
+
+      await db
+        .delete(PetCareRoutines)
+        .where(and(eq(PetCareRoutines.id, input.id), eq(PetCareRoutines.userId, user.id)));
+
+      await pushDashboardSummary({ userId: user.id, sessionToken: context.locals.sessionToken, rootAppUrl: context.locals.rootAppUrl });
+      return { success: true };
+    },
+  }),
+
+  reorderPetCareRoutines: defineAction({
+    input: z.object({ petId: z.string().min(1), orderedIds: z.array(z.string()).min(1) }),
+    handler: async (input, context) => {
+      const user = requireUser(context);
+      await assertPetOwnership(input.petId, user.id);
+
       const routines = await db
         .select()
         .from(PetCareRoutines)
-        .where(whereClause);
+        .where(and(eq(PetCareRoutines.petId, input.petId), eq(PetCareRoutines.userId, user.id)))
+        .orderBy(asc(PetCareRoutines.sortOrder));
 
-      return { success: true, data: { items: routines, total: routines.length } };
+      const existingIds = new Set(routines.map((routine) => routine.id));
+      if (input.orderedIds.some((id) => !existingIds.has(id))) {
+        throw new ActionError({ code: "BAD_REQUEST", message: "Invalid routine order payload." });
+      }
+
+      await Promise.all(
+        input.orderedIds.map((id, index) =>
+          db
+            .update(PetCareRoutines)
+            .set({ sortOrder: index, updatedAt: new Date() })
+            .where(and(eq(PetCareRoutines.id, id), eq(PetCareRoutines.userId, user.id))),
+        ),
+      );
+
+      return { success: true };
     },
   }),
 
@@ -283,9 +332,9 @@ export const server = {
     input: z.object({
       petId: z.string().min(1),
       routineId: z.string().optional(),
-      logDateTime: z.union([z.date(), z.string().datetime()]).optional(),
-      status: z.enum(["done", "skipped"]).optional(),
-      notes: z.string().optional(),
+      title: z.string().min(1).max(120),
+      loggedAt: z.union([z.date(), z.string().datetime()]).optional(),
+      notes: z.string().max(800).optional(),
     }),
     handler: async (input, context) => {
       const user = requireUser(context);
@@ -294,10 +343,7 @@ export const server = {
       if (input.routineId) {
         const routine = await assertRoutineOwnership(input.routineId, user.id);
         if (routine.petId !== input.petId) {
-          throw new ActionError({
-            code: "FORBIDDEN",
-            message: "Routine does not belong to this pet.",
-          });
+          throw new ActionError({ code: "FORBIDDEN", message: "Routine belongs to another pet." });
         }
       }
 
@@ -306,32 +352,14 @@ export const server = {
         petId: input.petId,
         routineId: input.routineId,
         userId: user.id,
-        logDateTime: input.logDateTime
-          ? parseDateInput(input.logDateTime)
-          : new Date(),
-        status: input.status,
-        notes: input.notes,
+        title: input.title.trim(),
+        loggedAt: parseDate(input.loggedAt) ?? new Date(),
+        notes: input.notes?.trim() || undefined,
         createdAt: new Date(),
       } satisfies typeof PetCareLogs.$inferInsert;
 
       await db.insert(PetCareLogs).values(log);
-
       return { success: true, data: { log } };
-    },
-  }),
-
-  listPetCareLogs: defineAction({
-    input: z.object({ petId: z.string().min(1) }),
-    handler: async (input, context) => {
-      const user = requireUser(context);
-      await assertPetOwnership(input.petId, user.id);
-
-      const logs = await db
-        .select()
-        .from(PetCareLogs)
-        .where(and(eq(PetCareLogs.petId, input.petId), eq(PetCareLogs.userId, user.id)));
-
-      return { success: true, data: { items: logs, total: logs.length } };
     },
   }),
 
@@ -339,22 +367,16 @@ export const server = {
     input: z.object({ id: z.string().min(1) }),
     handler: async (input, context) => {
       const user = requireUser(context);
-      const log = await db
+      const logs = await db
         .select()
         .from(PetCareLogs)
         .where(and(eq(PetCareLogs.id, input.id), eq(PetCareLogs.userId, user.id)));
 
-      if (!log.length) {
-        throw new ActionError({
-          code: "NOT_FOUND",
-          message: "Care log not found.",
-        });
+      if (!logs.length) {
+        throw new ActionError({ code: "NOT_FOUND", message: "Care log not found." });
       }
 
-      await db
-        .delete(PetCareLogs)
-        .where(and(eq(PetCareLogs.id, input.id), eq(PetCareLogs.userId, user.id)));
-
+      await db.delete(PetCareLogs).where(and(eq(PetCareLogs.id, input.id), eq(PetCareLogs.userId, user.id)));
       return { success: true };
     },
   }),
@@ -362,33 +384,52 @@ export const server = {
   createVetVisit: defineAction({
     input: z.object({
       petId: z.string().min(1),
-      visitDate: z.union([z.date(), z.string().datetime()]).optional(),
-      clinicName: z.string().optional(),
-      reason: z.string().optional(),
-      diagnosis: z.string().optional(),
-      treatment: z.string().optional(),
-      medications: z.string().optional(),
-      followUpDate: z.union([z.date(), z.string().datetime()]).optional(),
+      visitDate: z.union([z.date(), z.string().date()]),
+      clinicName: z.string().max(120).optional(),
+      reason: z.string().max(200).optional(),
+      notes: z.string().max(1200).optional(),
+      followUpDate: z.union([z.date(), z.string().date()]).optional(),
     }),
     handler: async (input, context) => {
       const user = requireUser(context);
-      await assertPetOwnership(input.petId, user.id);
+      const pet = await assertPetOwnership(input.petId, user.id);
+      const now = new Date();
 
       const visit = {
         id: crypto.randomUUID(),
         petId: input.petId,
         userId: user.id,
-        visitDate: input.visitDate ? parseDateInput(input.visitDate) : new Date(),
-        clinicName: input.clinicName,
-        reason: input.reason,
-        diagnosis: input.diagnosis,
-        treatment: input.treatment,
-        medications: input.medications,
-        followUpDate: parseDateInput(input.followUpDate),
-        createdAt: new Date(),
+        visitDate: parseDate(input.visitDate) ?? now,
+        clinicName: input.clinicName?.trim() || undefined,
+        reason: input.reason?.trim() || undefined,
+        notes: input.notes?.trim() || undefined,
+        followUpDate: parseDate(input.followUpDate),
+        createdAt: now,
+        updatedAt: now,
       } satisfies typeof VetVisits.$inferInsert;
 
       await db.insert(VetVisits).values(visit);
+
+      await Promise.all([
+        pushNotification({
+          userId: user.id,
+          sessionToken: context.locals.sessionToken,
+          rootAppUrl: context.locals.rootAppUrl,
+          title: "Vet visit recorded",
+          message: `${pet.name} visit logged for ${visit.visitDate.toISOString().slice(0, 10)}.`,
+          level: "success",
+        }),
+        visit.followUpDate
+          ? pushNotification({
+              userId: user.id,
+              sessionToken: context.locals.sessionToken,
+              rootAppUrl: context.locals.rootAppUrl,
+              title: "Follow-up added",
+              message: `${pet.name} has a follow-up on ${visit.followUpDate.toISOString().slice(0, 10)}.`,
+              level: "info",
+            })
+          : Promise.resolve(),
+      ]);
 
       return { success: true, data: { visit } };
     },
@@ -397,48 +438,26 @@ export const server = {
   updateVetVisit: defineAction({
     input: z.object({
       id: z.string().min(1),
-      petId: z.string().optional(),
-      visitDate: z.union([z.date(), z.string().datetime()]).optional(),
-      clinicName: z.string().optional(),
-      reason: z.string().optional(),
-      diagnosis: z.string().optional(),
-      treatment: z.string().optional(),
-      medications: z.string().optional(),
-      followUpDate: z.union([z.date(), z.string().datetime()]).optional(),
+      visitDate: z.union([z.date(), z.string().date()]),
+      clinicName: z.string().max(120).nullable().optional(),
+      reason: z.string().max(200).nullable().optional(),
+      notes: z.string().max(1200).nullable().optional(),
+      followUpDate: z.union([z.date(), z.string().date()]).nullable().optional(),
     }),
     handler: async (input, context) => {
       const user = requireUser(context);
-      const visit = await db
-        .select()
-        .from(VetVisits)
-        .where(and(eq(VetVisits.id, input.id), eq(VetVisits.userId, user.id)));
-
-      if (!visit.length) {
-        throw new ActionError({
-          code: "NOT_FOUND",
-          message: "Vet visit not found.",
-        });
-      }
-
-      const targetPetId = input.petId ?? visit[0].petId;
-      await assertPetOwnership(targetPetId, user.id);
-
-      const updates: Partial<typeof VetVisits.$inferInsert> = {};
-
-      if (input.petId !== undefined) updates.petId = input.petId;
-      if (input.visitDate !== undefined)
-        updates.visitDate = parseDateInput(input.visitDate);
-      if (input.clinicName !== undefined) updates.clinicName = input.clinicName;
-      if (input.reason !== undefined) updates.reason = input.reason;
-      if (input.diagnosis !== undefined) updates.diagnosis = input.diagnosis;
-      if (input.treatment !== undefined) updates.treatment = input.treatment;
-      if (input.medications !== undefined) updates.medications = input.medications;
-      if (input.followUpDate !== undefined)
-        updates.followUpDate = parseDateInput(input.followUpDate);
+      await assertVetVisitOwnership(input.id, user.id);
 
       await db
         .update(VetVisits)
-        .set(updates)
+        .set({
+          visitDate: parseDate(input.visitDate),
+          clinicName: input.clinicName?.trim() || undefined,
+          reason: input.reason?.trim() || undefined,
+          notes: input.notes?.trim() || undefined,
+          followUpDate: parseDate(input.followUpDate),
+          updatedAt: new Date(),
+        })
         .where(and(eq(VetVisits.id, input.id), eq(VetVisits.userId, user.id)));
 
       return { success: true };
@@ -449,38 +468,10 @@ export const server = {
     input: z.object({ id: z.string().min(1) }),
     handler: async (input, context) => {
       const user = requireUser(context);
-      const visit = await db
-        .select()
-        .from(VetVisits)
-        .where(and(eq(VetVisits.id, input.id), eq(VetVisits.userId, user.id)));
+      await assertVetVisitOwnership(input.id, user.id);
 
-      if (!visit.length) {
-        throw new ActionError({
-          code: "NOT_FOUND",
-          message: "Vet visit not found.",
-        });
-      }
-
-      await db
-        .delete(VetVisits)
-        .where(and(eq(VetVisits.id, input.id), eq(VetVisits.userId, user.id)));
-
+      await db.delete(VetVisits).where(and(eq(VetVisits.id, input.id), eq(VetVisits.userId, user.id)));
       return { success: true };
-    },
-  }),
-
-  listVetVisits: defineAction({
-    input: z.object({ petId: z.string().min(1) }),
-    handler: async (input, context) => {
-      const user = requireUser(context);
-      await assertPetOwnership(input.petId, user.id);
-
-      const visits = await db
-        .select()
-        .from(VetVisits)
-        .where(and(eq(VetVisits.petId, input.petId), eq(VetVisits.userId, user.id)));
-
-      return { success: true, data: { items: visits, total: visits.length } };
     },
   }),
 };

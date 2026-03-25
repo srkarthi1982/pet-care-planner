@@ -26,5 +26,6 @@ MANDATORY: After completing each task, update this repo’s AGENTS.md Task Log (
 
 ## Task Log (Recent)
 - Keep newest first; include date and short summary.
+- 2026-03-25 Implemented full V1 pet-care-planner (Astro DB schema, ownership-enforced actions, Alpine global store, /app + /app/pets/[id], dashboard/notification hooks, auth scope fix); validated build and documented typecheck dependency limitation.
 - 2026-02-09 Added repo-level AGENTS.md enforcement contract (workspace reference + mandatory task-log update rule).
 - 2026-02-09 Initialized repo AGENTS baseline for single-repo Codex/AI safety.
